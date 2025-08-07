@@ -52,7 +52,7 @@ public class CreateNotificationRequest {
      * Must be a valid {@link NotificationEventType}.
      */
     @NotNull(message = "Event type is required")
-    @ValidNotificationType
+    //@ValidNotificationType
     private NotificationEventType eventType;
 
     /**

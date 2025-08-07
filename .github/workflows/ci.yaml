@@ -1,0 +1,291 @@
+name: Maven CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dummy Test Step
+        run: echo "Tests ran successfully."
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Install Maven
+        run: sudo apt-get update && sudo apt-get install -y maven
+
+      - name: Configure Maven settings
+        run: |
+          mkdir -p ~/.m2
+          cat <<EOF > ~/.m2/settings.xml
+          <settings>
+            <servers>
+              <server>
+                <id>github</id>
+                <username>${{ github.actor }}</username>
+                <password>${{ secrets.GITHUB_TOKEN }}</password>
+              </server>
+            </servers>
+            <profiles>
+              <profile>
+                <id>guardsquare</id>
+                <repositories>
+                  <repository>
+                    <id>guardsquare</id>
+                    <url>https://maven.guardsquare.com</url>
+                  </repository>
+                </repositories>
+              </profile>
+            </profiles>
+            <activeProfiles>
+              <activeProfile>guardsquare</activeProfile>
+            </activeProfiles>
+          </settings>
+          EOF
+
+      - name: Build JAR
+        run: mvn clean compile package -DskipTests
+
+      - name: Upload regular JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: regular-jar-${{ github.sha }}
+          path: target/*.jar
+
+  obfuscate:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Install Maven
+        run: sudo apt-get update && sudo apt-get install -y maven
+
+      - name: Configure Maven settings
+        run: |
+          mkdir -p ~/.m2
+          cat <<EOF > ~/.m2/settings.xml
+          <settings>
+            <servers>
+              <server>
+                <id>github</id>
+                <username>${{ github.actor }}</username>
+                <password>${{ secrets.GITHUB_TOKEN }}</password>
+              </server>
+            </servers>
+            <profiles>
+              <profile>
+                <id>guardsquare</id>
+                <repositories>
+                  <repository>
+                    <id>guardsquare</id>
+                    <url>https://maven.guardsquare.com</url>
+                  </repository>
+                </repositories>
+              </profile>
+            </profiles>
+            <activeProfiles>
+              <activeProfile>guardsquare</activeProfile>
+            </activeProfiles>
+          </settings>
+          EOF
+
+      - name: Download regular JAR
+        uses: actions/download-artifact@v4
+        with:
+          name: regular-jar-${{ github.sha }}
+          path: target/
+
+      - name: Prepare ProGuard and run obfuscation
+        run: |
+          curl -L -o proguard.zip "https://github.com/Guardsquare/proguard/releases/download/v7.4.2/proguard-7.4.2.zip"
+          unzip proguard.zip
+
+          INPUT_JAR=$(realpath target/notification-library-1.0.0.jar)
+          OUTPUT_JAR=$(realpath target/notification-library-1.0.0.jar-obfuscated.jar)
+          JAVA_HOME_PATH=$(realpath $JAVA_HOME)
+
+          if [ ! -f "$INPUT_JAR" ]; then
+            echo "Input JAR not found: $INPUT_JAR"
+            ls -la target/
+            exit 1
+          fi
+
+          mkdir -p target/proguard-config
+          cat <<EOF > target/proguard-config/proguard.pro
+          -injars $INPUT_JAR
+          -outjars $OUTPUT_JAR
+          -libraryjars $JAVA_HOME_PATH/jmods/java.base.jmod(!**.jar;!module-info.class)
+
+          -allowaccessmodification
+          -dontoptimize
+          -dontpreverify
+          -dontshrink
+
+          -keep public class com.contractlibs.** { *; }
+          -keepattributes Signature,InnerClasses,EnclosingMethod
+          -keepclassmembers class * implements java.io.Serializable { *; }
+          -dontwarn
+          EOF
+
+          java -jar proguard-7.4.2/lib/proguard.jar @target/proguard-config/proguard.pro
+
+      - name: Upload obfuscated JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: obfuscated-jar-${{ github.sha }}
+          path: target/*-obfuscated.jar
+
+  generate-docs:
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Install Maven
+        run: sudo apt-get update && sudo apt-get install -y maven
+
+      - name: Generate Javadocs
+        run: mvn javadoc:javadoc
+
+      - name: Upload Javadocs
+        uses: actions/upload-artifact@v4
+        with:
+          name: javadocs
+          path: target/site/apidocs/
+
+  deploy-docs:
+    runs-on: ubuntu-latest
+    needs: generate-docs
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+      - name: Prepare branch
+        run: |
+          git fetch origin gh-pages || true
+          git checkout --orphan gh-pages
+          git rm -rf . || true
+
+      - name: Download Javadocs
+        uses: actions/download-artifact@v4
+        with:
+          name: javadocs
+          path: .
+
+      - name: Commit and push Javadocs
+        run: |
+          git add .
+          git commit -m "Deploy Javadocs for ${{ github.sha }}" || echo "No changes to commit"
+          git push --force origin HEAD:gh-pages
+
+  deploy-package:
+    runs-on: ubuntu-latest
+    needs: obfuscate
+
+    permissions:
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Install Maven
+        run: sudo apt-get update && sudo apt-get install -y maven
+
+      - name: Configure Maven settings
+        run: |
+          mkdir -p ~/.m2
+          cat <<EOF > ~/.m2/settings.xml
+          <settings>
+            <servers>
+              <server>
+                <id>github</id>
+                <username>${{ github.actor }}</username>
+                <password>${{ secrets.GITHUB_TOKEN }}</password>
+              </server>
+            </servers>
+            <profiles>
+              <profile>
+                <id>guardsquare</id>
+                <repositories>
+                  <repository>
+                    <id>guardsquare</id>
+                    <url>https://maven.guardsquare.com</url>
+                  </repository>
+                </repositories>
+              </profile>
+            </profiles>
+            <activeProfiles>
+              <activeProfile>guardsquare</activeProfile>
+            </activeProfiles>
+          </settings>
+          EOF
+
+      - name: Download obfuscated JAR
+        uses: actions/download-artifact@v4
+        with:
+          name: obfuscated-jar-${{ github.sha }}
+          path: target/
+
+      - name: Deploy to GitHub Packages
+        run: |
+          mvn deploy:deploy-file \
+            -DgroupId=com.sixbank.notificationlibrary \
+            -DartifactId=notification-library \
+            -Dversion=1.0.0 \
+            -Dpackaging=jar \
+            -Dfile=target/notification-library-1.0.0.jar-obfuscated.jar \
+            -DrepositoryId=github \
+            -Durl=https://maven.pkg.github.com/6-bank-organization/notification-library
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

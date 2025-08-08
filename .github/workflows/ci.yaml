@@ -280,7 +280,7 @@ jobs:
       - name: Deploy to GitHub Packages
         run: |
           mvn deploy:deploy-file \
-            -DgroupId=com.sixbank.notificationlibrary \
+            -DgroupId=com.sixbank \
             -DartifactId=notification-library \
             -Dversion=1.0.0 \
             -Dpackaging=jar \
